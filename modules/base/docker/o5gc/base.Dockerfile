@@ -75,13 +75,10 @@ RUN cd /usr/local/bin/ && cached-download.sh                                  \
 COPY install-docker.sh /usr/local/bin/
 RUN install-docker.sh --image cli-only
 
-RUN --mount=type=secret,id=id_ed25519 --mount=type=secret,id=id_ed25519.pub   \
-    mkdir -m 0700 /root/.ssh && cd /root/.ssh                                 \
-    && cp /run/secrets/id_ed25519* .                                          \
-    && chmod +r id_ed25519.pub                                                \
-    && cp id_ed25519.pub authorized_keys
+# no SSH keys in the image, install-ssh-keys.sh sets them up at runtime
+RUN mkdir -m 0700 /root/.ssh
 
-COPY install-uhd.sh /usr/local/bin/
+COPY install-uhd.sh install-ssh-keys.sh /usr/local/bin/
 
 RUN echo ${BASE_IMG} > /etc/image_version                                     \
     && echo ${BUILD_HOST} > /etc/build_host
