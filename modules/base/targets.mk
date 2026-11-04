@@ -27,10 +27,16 @@ build-cacher-clean:
 
 O5GC_BASE_IMAGES = jammy
 TIMEZONE = $(shell timedatectl show -p Timezone --value)
+# PULL_O5GC_BASE=1: use the published base image instead of building it, so
+# images built on top of it share its layers in the registry
 docker-build-o5gc-base:
+ifeq (${PULL_O5GC_BASE},1)
+	$(MAKE) docker-pull-o5gc-base
+else
 	$(call docker-build-remotely,${DOCKER_ALL_HOSTS},${O5GC_BASE_IMAGES})
+endif
 	$(call docker_image_ls,o5gc-base)
-docker-build-o5gc-base-%: .docker-build-prerequisites
+docker-build-o5gc-base-%:
 	$(call parse-stem,$*)
 	$(call docker-build,base,o5gc,base,USE_BUILD_CACHER=${USE_BUILD_CACHER} BUILD_HOST=${$@_H} BASE_IMG=${$@_V} TZ=$(TIMEZONE),,${$@_V},${$@_H})
 

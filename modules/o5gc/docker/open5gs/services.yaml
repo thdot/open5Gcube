@@ -310,6 +310,8 @@ services:
     environment:
       - UPF_ADVERTISE_IP=${UPF_IP_ADDR}
       - CAPTURE_INTERFACE=ogstun
+    volumes:
+      - ${VAR}/ssh/:/var/run/ssh/:ro
     networks:
       corenet:
         ipv4_address: ${UPF_IP_ADDR}

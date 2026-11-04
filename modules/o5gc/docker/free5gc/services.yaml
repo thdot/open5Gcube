@@ -50,6 +50,7 @@ services:
       - /lib/modules:/lib/modules:ro
       - /usr/src:/usr/src:ro
       - ${BASE}/var/ssl:/mnt/o5gc/ssl:ro
+      - ${VAR}/ssh/:/var/run/ssh/:ro
     hostname: upf
     networks:
       corenet:

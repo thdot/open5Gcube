@@ -103,6 +103,16 @@ make build-cacher-start docker-build-all
 ```
 and get yourself a big cup of coffee as this will take a few hours.
 
+Alternatively, pull the prebuilt images from the GitHub container registry:
+```console
+make docker-pull-all
+```
+The images for SDR hardware are built for the CPU of the RAN host and are not published:
+``oai-ran``, ``srsran-4g``, ``srsran-project``, ``ocudu``, ``osmocom-trx``, ``misc-falcon``,
+``misc-ltesniffer`` and ``misc-nrscope``. Build the ones you need with
+``make docker-build-<image-name>``. Add ``PULL_O5GC_BASE=1`` to build them on top of the
+published ``o5gc-base`` image instead of building that as well.
+
 ### Start the open5Gcube WebUI
 ```console
 make webui-start
