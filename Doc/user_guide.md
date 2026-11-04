@@ -126,6 +126,13 @@ For example:
 ```console
 make docker-build-oai-amf
 ```
+Instead of building them, most images can be pulled from the GitHub container registry with
+```console
+make docker-pull-all
+```
+``make docker-push-all`` publishes the local images to ``REGISTRY`` (default
+``ghcr.io/open5gcube``). The images in ``REGISTRY_EXCLUDE`` are left out, because they are built
+with ``-march=native``.
 To delete all images, the following command is used:
 ```console
 make docker-purge-all-images
