@@ -15,7 +15,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: images
+  group: images-test
   cancel-in-progress: false
 
 env:
@@ -23,35 +23,7 @@ env:
   OCI_IMG_SOURCE: ${{ github.server_url }}/${{ github.repository }}
 
 jobs:
-  base:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    outputs:
-      images: ${{ steps.images.outputs.images }}
-    steps:
-      - uses: actions/checkout@v5
-      - &registry
-        name: Set registry
-        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_ENV}"
-      - &login
-        name: Log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build o5gc-base
-        run: make docker-build-o5gc-base
-      - name: Push o5gc-base
-        run: make docker-push-o5gc-base
-      - name: List published images
-        id: images
-        run: |
-          images=$(make -s print-REGISTRY_IMAGES | cut -d= -f2)
-          echo "images=$(jq -cn --arg i "${images}" '$i | split(" ")')" >> "${GITHUB_OUTPUT}"
-
   images:
-    needs: base
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -66,26 +38,6 @@ jobs:
               docker-build-osmocom-msc docker-build-osmocom-bsc
               docker-build-osmocom-sgsn docker-build-osmocom-pcu
               docker-build-osmocom-bts docker-build-osmocom-cbc
-          - family: oai-core
-            targets: docker-build-oai-core
-          - family: open5gs
-            targets: docker-build-open5gs
-          - family: free5gc
-            targets: docker-build-free5gc
-          - family: ellacore
-            targets: >-
-              docker-build-ellacore docker-build-ellacore-ims
-              docker-build-ellacore-smsc
-          - family: volte
-            targets: docker-build-volte docker-build-volte-pyhss
-          - family: ran-emulators
-            targets: docker-build-ueransim docker-build-packetrusher
-          - family: tools
-            targets: >-
-              docker-build-mysql docker-build-simcard
-              docker-build-misc-sigdigger docker-build-misc-swagger
-          - family: webui
-            targets: docker-build-o5gc-webui
     name: images (${{ matrix.family }})
     steps:
       - name: Free disk space
@@ -96,34 +48,24 @@ jobs:
           docker system prune --all --force
           df -h /
       - uses: actions/checkout@v5
-      - *registry
-      - *login
+      - name: Set registry
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_ENV}"
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build images
         run: make PULL_O5GC_BASE=1 ${{ matrix.targets }}
       - name: Push images
-        run: make docker-push-all
+        run: |
+          make docker-push-all 2>&1 | tee push.log || {
+            grep -v -E 'Preparing|Waiting|Pushed|Layer already exists|Mounted from' push.log \
+              | tail -15 | sed 's/^/::error::/'; exit 1; }
       - name: Image sizes
         if: always()
         run: |
           docker image ls 'o5gc/*'
           df -h /
 
-  cleanup:
-    needs: [ base, images ]
-    if: always() && needs.base.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        image: ${{ fromJSON(needs.base.outputs.images) }}
-    steps:
-      # every rebuild moves the tags; the old, untagged manifests and their
-      # layers would otherwise stay in the registry
-      - name: Delete untagged versions of ${{ matrix.image }}
-        uses: actions/delete-package-versions@v5
-        continue-on-error: true
-        with:
-          package-name: ${{ matrix.image }}
-          package-type: container
-          delete-only-untagged-versions: 'true'
