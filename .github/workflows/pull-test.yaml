@@ -1,0 +1,52 @@
+name: pull-test
+
+# test only: pull the published images anonymously and run an emulated stack
+
+on:
+  push:
+    tags: [ 'pulltest*' ]
+
+permissions:
+  contents: read
+
+jobs:
+  pull-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune --all --force
+          df -h /
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-virtualenv
+          sudo modprobe sctp || true
+      - name: Pull images (anonymous)
+        run: |
+          docker logout ghcr.io || true
+          time make "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" docker-pull-all
+          docker image ls 'o5gc/*'
+          df -h /
+      - name: Run ueransim-open5gs tests
+        run: make tests-run-ueransim-open5gs
+      - name: SSH into the UPF
+        run: |
+          DETACHED=1 make run-ueransim-open5gs
+          for _ in $(seq 60); do
+              [ "$(docker inspect -f '{{.State.Health.Status}}' upf 2>/dev/null)" == healthy ] && break
+              sleep 2
+          done
+          ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' upf | cut -d' ' -f1)
+          ssh -i var/ssh/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes "root@${ip}" \
+              'echo SSH OK on $(hostname); ls -l /root/.ssh'
+          make stop-ueransim-open5gs
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: tests/results
