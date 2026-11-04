@@ -20,6 +20,7 @@ help:  ## This help
 	@awk -F ':|##' '/^[^\t].+?:.*?##/ {printf "\033[36m%-30s\033[0m %s\n", $$1, $$NF }' $(MAKEFILE_LIST)
 
 OCI_IMG_KEY = org.opencontainers.image
+OCI_IMG_SOURCE ?= https://github.com/open5Gcube/open5Gcube
 
 var/ssh/authorized_keys: var/ssh/id_ed25519
 	cat $<.pub >> $@
@@ -29,8 +30,6 @@ var/ssh/id_ed25519:
 var/ssh/ssh_host_%_ed25519_key:
 	$(foreach keytype, rsa ecdsa ed25519,                                     \
 	    ssh-keygen -N "" -t ${keytype} -f var/ssh/ssh_host_$*_${keytype}_key;)
-
-.docker-build-prerequisites: var/ssh/id_ed25519
 
 var/ssl/MOK.der:
 	openssl req -nodes -new -x509 -newkey rsa:2048 -days 36500                \
@@ -47,6 +46,15 @@ system-test-mok: var/ssl/MOK.der
 
 docker-img-version = $$(${1} run --rm --entrypoint /bin/cat o5gc/${2} /etc/image_version)
 docker-src-ip-for-remote = $(shell ip route get $$(getent hosts ${1} | cut -d " " -f1) | sed -n 's|.* src \([0-9.]*\) .*|\1|p')
+# DOCKER_BUILD_CACHE=<registry>: use and update a build cache in the registry,
+# <registry>/<image>:buildcache-<tag>; needs the containerd image store.
+# DOCKER_BUILD_NO_CACHE=1 rebuilds everything, e.g. to get package updates.
+comma := ,
+docker-build-cache-ref = type=registry$(comma)ref=${DOCKER_BUILD_CACHE}/${1}:buildcache-${2}
+docker-build-cache = $(if ${DOCKER_BUILD_CACHE},                              \
+    --cache-from $(call docker-build-cache-ref,${1},${2})                     \
+    --cache-to $(call docker-build-cache-ref,${1},${2})$(comma)mode=max$(comma)image-manifest=true$(comma)oci-mediatypes=true$(comma)ignore-error=true) \
+    $(if $(filter 1,${DOCKER_BUILD_NO_CACHE}),--no-cache)
 define docker-build
     $(eval $@_PRJ = $(subst docker-build-,,${2}))
     $(eval $@_IMG = $(subst /,-,${$@_PRJ})$(if ${3},-$(subst docker-build-${2}-,,${3})))
@@ -55,21 +63,22 @@ define docker-build
     $(eval $@_DOCKER = docker $(if ${$@_BUILD_HOST},-H ssh://${$@_BUILD_HOST}))
     $(if ${$@_BUILD_HOST},tar -cf var/tmp/${$@_BUILD_HOST}-${$@_IMG}.tar -C modules/${1}/docker/${$@_PRJ} .)
     cd modules/${1}/docker/${$@_PRJ} &&                                       \
-    DOCKER_BUILDKIT=1 ${$@_DOCKER} build                                      \
+    ${$@_DOCKER} build                                                        \
         --tag o5gc/${$@_TAG}                                                  \
-		$(if ${5},--target=${5})                                              \
+        --sbom false --provenance false                                       \
+        $(call docker-build-cache,${$@_IMG},$(or ${6},latest))                \
+        $(if ${5},--target=${5})                                              \
         $(foreach arg,${4},--build-arg $(arg))                                \
-		$(if ${http_proxy},--build-arg http_proxy=${http_proxy},)             \
-		$(if ${https_proxy},--build-arg https_proxy=${https_proxy},)          \
+        $(if ${http_proxy},--build-arg http_proxy=${http_proxy},)             \
+        $(if ${https_proxy},--build-arg https_proxy=${https_proxy},)          \
         --label ${OCI_IMG_KEY}.created="$(shell date --rfc-3339=seconds)"     \
-        --secret id=id_ed25519,src=${BASE_DIR}/var/ssh/id_ed25519             \
-        --secret id=id_ed25519.pub,src=${BASE_DIR}/var/ssh/id_ed25519.pub     \
+        --label ${OCI_IMG_KEY}.source=${OCI_IMG_SOURCE}                       \
         --add-host o5gc-build-cacher:${DOCKER_HOST_BRIDGE}                    \
         --file $(if ${3},$(subst docker-build-${2}-,,${3}).)Dockerfile        \
         $(if ${$@_BUILD_HOST},- < ${BASE_DIR}/var/tmp/${$@_BUILD_HOST}-${$@_IMG}.tar,.)
     $(if ${$@_BUILD_HOST},rm -f var/tmp/${$@_BUILD_HOST}-${$@_IMG}.tar)
-    echo "FROM o5gc/${$@_TAG}" | ${$@_DOCKER} build                           \
-        --tag "o5gc/${$@_TAG}"                                                \
+    echo "FROM o5gc/${$@_TAG}" | ${$@_DOCKER} build --quiet                   \
+        --sbom false --provenance false --tag "o5gc/${$@_TAG}"                \
         --label ${OCI_IMG_KEY}.version="$(call docker-img-version,${$@_DOCKER},${$@_TAG})" -
     ${$@_DOCKER} tag                                                          \
         o5gc/${$@_TAG}                                                        \
@@ -94,18 +103,51 @@ GIT_SUBMODULES = $(strip $(foreach m,$(wildcard modules/*),$(shell git config --
 DOCKER_FILES_IGNORE += $(foreach m,${GIT_SUBMODULES},${m}/%)
 DOCKER_FILES = $(filter-out ${DOCKER_FILES_IGNORE},$(shell find -L modules/*/docker/ -name *Dockerfile))
 
-docker_image_ls = docker image ls o5gc/${1} | (read h; echo "$$h"; LC_ALL=C sort)
+docker_image_ls = docker image ls o5gc/${1} --format table | (read h; echo "$$h"; LC_ALL=C sort)
 DOCKER_BUILD_ALL = $(filter-out %-build-cacher,$(filter-out %-base,$(sort     \
     $(shell echo ${DOCKER_FILES} | tr ' ' '\n' | cut -d '/' -f2-              \
         | sed -E "s|.*/docker/(.*)/([^.]*).?Dockerfile|docker-build-\1-\2|"   \
         | sed -E "s|/|-|" | sed -E "s|(.*)-$$|\1|"))))
 docker-build-all: clean build-cacher-restart docker-build-o5gc-base  ## Build all Docker images
 	$(MAKE) ${PARALLEL_JOBS} RUN_PARALLEL=1 ${DOCKER_BUILD_ALL} pull-all-external-images
-	$(MAKE) docker-cleanup
+	$(MAKE) docker-cleanup docker-builder-cleanup
 	$(call docker_image_ls,*)
 
 pull-all-external-images:
 	$(foreach img,$(filter-out o5gc/%,${IMAGES}),docker pull ${img};)
+
+# Prebuilt images in the container registry. Images built with -march=native
+# (UHD, osmo-trx) only run on the CPU they were built for and are not published.
+REGISTRY ?= ghcr.io/open5gcube
+REGISTRY_EXCLUDE = oai-ran srsran-4g srsran-project ocudu osmocom-trx         \
+                   misc-falcon misc-ltesniffer misc-nrscope
+REGISTRY_IMAGES = o5gc-base osmocom-base oai-cn5g-base                        \
+    $(filter-out ${REGISTRY_EXCLUDE},$(patsubst docker-build-%,%,${DOCKER_BUILD_ALL}))
+# phony, so that make does not take the recipe of docker-push-% / docker-pull-%
+.PHONY: docker-push-all docker-pull-all
+# a pulled o5gc-base (PULL_O5GC_BASE=1) is already in the registry
+docker-push-all: $(addprefix docker-push-,$(filter-out $(if $(filter 1,${PULL_O5GC_BASE}),o5gc-base),${REGISTRY_IMAGES}))  ## Push the local o5gc images to the registry
+# ghcr.io sometimes fails a layer mounted from another image with "unknown
+# blob", the next attempt succeeds
+docker-push-%:
+	@for tag in $$(docker image ls o5gc/$* --format '{{.Tag}}'                \
+	        | grep -vx -e develop -e '<none>'); do                            \
+	    docker tag o5gc/$*:$${tag} ${REGISTRY}/$*:$${tag} || exit 1;          \
+	    for try in 1 2 3; do                                                  \
+	        docker push ${REGISTRY}/$*:$${tag} && break;                      \
+	        [ $${try} -lt 3 ] || exit 1;                                      \
+	        echo "push failed, retrying ($${try}/3)"; sleep 10;               \
+	    done;                                                                 \
+	    docker image rm ${REGISTRY}/$*:$${tag} >/dev/null;                    \
+	done
+docker-pull-all: $(addprefix docker-pull-,${REGISTRY_IMAGES})  ## Pull prebuilt o5gc images instead of building them
+	$(call docker_image_ls,*)
+docker-pull-%:
+	$(foreach tag,$(or $(call image_versions,$*),$(if $(filter o5gc-base,$*),${O5GC_BASE_IMAGES},latest)), \
+	    docker pull ${REGISTRY}/$*:${tag} &&                                  \
+	    docker tag ${REGISTRY}/$*:${tag} o5gc/$*:${tag} &&                    \
+	    docker image rm ${REGISTRY}/$*:${tag} >/dev/null &&                   \
+	    docker tag o5gc/$*:${tag} o5gc/$*:$(call docker-img-version,docker,$*:${tag}) &&) true
 
 DEVLOP_IMAGES = $(shell docker images o5gc/*:develop --format "{{.Repository}}")
 DEVELOP_VOLUMES = $(shell                                                     \
@@ -185,7 +227,7 @@ git-update-modules:
 	    git -C $${module} pull --rebase;                                      \
 	done
 
-.create-running-env: docker-cleanup
+.create-running-env: docker-cleanup var/ssh/id_ed25519
 
 .xhost:
 	xhost local:root
@@ -196,12 +238,20 @@ stop_stack = cd modules/${1}/stacks/${2}; $(DOCKER_COMPOSE) $(foreach p,${3},--p
 uhd_image_loader:  ##
 	scripts/uhd_image_loader.sh
 
-docker-cleanup: ${O5GC_ENV}  ## Cleanup old Docker related artifacts
-	$(MAKE) $(foreach host,${DOCKER_ALL_HOSTS},docker-cleanup-${host})
+docker-cleanup docker-builder-cleanup: ${O5GC_ENV}  ## Cleanup old Docker related artifacts
+	$(MAKE) $(foreach host,${DOCKER_ALL_HOSTS},docker-$(subst docker-,,$@)-${host})
 docker-cleanup-%:
 	$(eval $@_HOST = $(if $(subst localhost,,$*),$*))
 	$(eval $@_DOCKER = docker $(if ${$@_HOST},-H ssh://${$@_HOST}))
-	${$@_DOCKER} system prune --filter label!=o5gc-bridge --force --volumes
+	${$@_DOCKER} container prune --force
+	${$@_DOCKER} image prune --force
+	${$@_DOCKER} volume prune --force
+	${$@_DOCKER} network prune --force --filter label!=o5gc-bridge
+#	${$@_DOCKER} system prune --filter label!=o5gc-bridge --force --volumes
+docker-builder-cleanup-%:
+	$(eval $@_HOST = $(if $(subst localhost,,$*),$*))
+	$(eval $@_DOCKER = docker $(if ${$@_HOST},-H ssh://${$@_HOST}))
+	${$@_DOCKER} builder prune --force --filter until=24h
 
 docker-purge-old-images:
 	@echo "Old images:";                                                      \
@@ -220,7 +270,6 @@ docker-purge-old-images:
 	echo -n 'Purge? [y/n] '; read 'x';                                        \
 	[ "$$x" == 'y' ] && docker image rm --force $${old_images}
 	$(MAKE) docker-cleanup clean
-
 
 docker-purge-all-images: build-cacher-stop webui-stop  ## purge all project related Docker images
 	@echo -n 'Purge all o5gc images? [y/n] ' && read 'x' && [ $$x == 'y' ]

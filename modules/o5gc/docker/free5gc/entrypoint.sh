@@ -25,6 +25,7 @@ if [[ "${service}" == "upf" ]]; then
         popd
     fi
     iptables -t nat -A POSTROUTING -s ${UE_IP_SUBNET} ! -o upfgtp -j MASQUERADE
+    install-ssh-keys.sh
     service ssh start
 fi
 
