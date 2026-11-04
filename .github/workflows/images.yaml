@@ -1,0 +1,129 @@
+name: images
+
+# Build the o5gc images and publish them to ghcr.io/<owner>/<image>.
+# Each run uploads about 6 GB of new layers, so it runs on release tags and on
+# demand only. All images are built on top of the one published o5gc-base, so
+# its layers are stored only once in the registry.
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images
+  cancel-in-progress: false
+
+env:
+  USE_BUILD_CACHER: 0
+  OCI_IMG_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+
+jobs:
+  base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      images: ${{ steps.images.outputs.images }}
+    steps:
+      - uses: actions/checkout@v5
+      - &registry
+        name: Set registry
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_ENV}"
+      - &login
+        name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build o5gc-base
+        run: make docker-build-o5gc-base
+      - name: Push o5gc-base
+        run: make docker-push-o5gc-base
+      - name: List published images
+        id: images
+        run: |
+          images=$(make -s print-REGISTRY_IMAGES | cut -d= -f2)
+          echo "images=$(jq -cn --arg i "${images}" '$i | split(" ")')" >> "${GITHUB_OUTPUT}"
+
+  images:
+    needs: base
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # one job per image family, so that intermediate bases (osmocom-base,
+        # oai-cn5g-base) are built only once; images in REGISTRY_EXCLUDE
+        # (Makefile) are not built here
+        include:
+          - family: osmocom
+            targets: >-
+              docker-build-osmocom-msc docker-build-osmocom-bsc
+              docker-build-osmocom-sgsn docker-build-osmocom-pcu
+              docker-build-osmocom-bts docker-build-osmocom-cbc
+          - family: oai-core
+            targets: docker-build-oai-core
+          - family: open5gs
+            targets: docker-build-open5gs
+          - family: free5gc
+            targets: docker-build-free5gc
+          - family: ellacore
+            targets: >-
+              docker-build-ellacore docker-build-ellacore-ims
+              docker-build-ellacore-smsc
+          - family: volte
+            targets: docker-build-volte docker-build-volte-pyhss
+          - family: ran-emulators
+            targets: docker-build-ueransim docker-build-packetrusher
+          - family: tools
+            targets: >-
+              docker-build-mysql docker-build-simcard
+              docker-build-misc-sigdigger docker-build-misc-swagger
+          - family: webui
+            targets: docker-build-o5gc-webui
+    name: images (${{ matrix.family }})
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune --all --force
+          df -h /
+      - uses: actions/checkout@v5
+      - *registry
+      - *login
+      - name: Build images
+        run: make PULL_O5GC_BASE=1 ${{ matrix.targets }}
+      - name: Push images
+        run: make docker-push-all
+      - name: Image sizes
+        if: always()
+        run: |
+          docker image ls 'o5gc/*'
+          df -h /
+
+  cleanup:
+    needs: [ base, images ]
+    if: always() && needs.base.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.base.outputs.images) }}
+    steps:
+      # every rebuild moves the tags; the old, untagged manifests and their
+      # layers would otherwise stay in the registry
+      - name: Delete untagged versions of ${{ matrix.image }}
+        uses: actions/delete-package-versions@v5
+        continue-on-error: true
+        with:
+          package-name: ${{ matrix.image }}
+          package-type: container
+          delete-only-untagged-versions: 'true'
