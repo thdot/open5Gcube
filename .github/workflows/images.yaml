@@ -4,11 +4,15 @@ name: images
 # All images are built on top of the one published o5gc-base, so its layers
 # are stored only once in the registry. The build cache is kept in the
 # registry as well (<image>:buildcache-<tag>): unchanged images are not
-# rebuilt and keep their layers. Run with no-cache to pick up package updates.
+# rebuilt and keep their layers. The monthly scheduled run and runs with
+# no-cache rebuild everything to pick up package updates.
 
 on:
   push:
+    branches: [ main ]
     tags: [ 'v*' ]
+  schedule:
+    - cron: '0 3 1 * *'
   workflow_dispatch:
     inputs:
       no-cache:
@@ -27,7 +31,7 @@ concurrency:
 env:
   USE_BUILD_CACHER: 0
   OCI_IMG_SOURCE: ${{ github.server_url }}/${{ github.repository }}
-  DOCKER_BUILD_NO_CACHE: ${{ inputs.no-cache && '1' || '0' }}
+  DOCKER_BUILD_NO_CACHE: ${{ (inputs.no-cache || github.event_name == 'schedule') && '1' || '0' }}
 
 jobs:
   base:
